@@ -1,37 +1,203 @@
-/* @import "tailwindcss";
+/* src/app/globals.css — Tailwind v4 CSS-first configuration */
+@import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
+/* ── Theme tokens ──────────────────────────────────────────────────────────── */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  /* Colours — Backgrounds */
+  --color-obsidian: #080B0F;
+  --color-carbon: #0C1017;
+  --color-panel: #111820;
+  --color-slate: #1A2332;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  /* Colours — Text */
+  --color-silver: #C8D1DC;
+  --color-ghost: #94A3B8;
+  --color-dim: #64748B;
+  --color-muted: #475569;
+
+  /* Colours — Accents */
+  --color-neon: #00FFB2;
+  --color-azure: #3D8EFF;
+  --color-crimson: #FF4060;
+  --color-amber: #FFB830;
+  --color-purple: #A855F7;
+
+  /* Colours — Borders */
+  --color-border: #1E293B;
+
+  /* Typography */
+  --font-display: "Inter", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* Shadows */
+  --shadow-neon-sm: 0 0 10px rgba(0, 255, 178, 0.15);
+  --shadow-neon-md: 0 0 20px rgba(0, 255, 178, 0.2);
+  --shadow-neon-lg: 0 0 40px rgba(0, 255, 178, 0.25);
+  --shadow-glass: 0 8px 32px rgba(0, 0, 0, 0.4);
+
+  /* Animations */
+  --animate-pulse-neon: pulse-neon 2s ease-in-out infinite;
+  --animate-glow: glow 2s ease-in-out infinite alternate;
+  --animate-slide-up: slide-up 0.5s ease-out;
+  --animate-fade-in: fade-in 0.5s ease-out;
+  --animate-float: float 6s ease-in-out infinite;
+
+  @keyframes pulse-neon {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  @keyframes glow {
+    0% { box-shadow: 0 0 5px rgba(0, 255, 178, 0.2), 0 0 20px rgba(0, 255, 178, 0.1); }
+    100% { box-shadow: 0 0 10px rgba(0, 255, 178, 0.4), 0 0 40px rgba(0, 255, 178, 0.2); }
+  }
+  @keyframes slide-up {
+    0% { opacity: 0; transform: translateY(20px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fade-in {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-10px); }
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-} */
+/* ── Base Styles ───────────────────────────────────────────────────────────── */
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-body {
-  background: radial-gradient(circle at top, #0f172a, #020617);
-  color: white;
-  font-family: ui-sans-serif, system-ui;
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
+body {
+  background: #080B0F;
+  color: #C8D1DC;
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0C1017; }
+::-webkit-scrollbar-thumb { background: #1E293B; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+/* ── Reusable Classes ──────────────────────────────────────────────────────── */
+
+.glass-card {
+  background: rgba(17, 24, 32, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(30, 41, 59, 0.8);
+  border-radius: 1rem;
+}
+
+.glass-card-hover {
+  background: rgba(17, 24, 32, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(30, 41, 59, 0.8);
+  border-radius: 1rem;
+  transition: all 0.3s ease;
+}
+.glass-card-hover:hover {
+  border-color: rgba(0, 255, 178, 0.3);
+  box-shadow: 0 0 20px rgba(0, 255, 178, 0.08);
+  transform: translateY(-2px);
+}
+
+.neon-border {
+  border: 1px solid rgba(0, 255, 178, 0.2);
+  box-shadow: 0 0 15px rgba(0, 255, 178, 0.05);
+}
+
+.text-gradient-neon {
+  background: linear-gradient(135deg, #00FFB2, #3D8EFF);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-warm {
+  background: linear-gradient(135deg, #FFB830, #FF4060);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.btn-neon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.75rem;
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 700;
+  font-size: 0.875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid #00FFB2;
+  color: #00FFB2;
+  background: transparent;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+.btn-neon:hover {
+  background: rgba(0, 255, 178, 0.1);
+  box-shadow: 0 0 20px rgba(0, 255, 178, 0.2);
+}
+.btn-neon:active { transform: scale(0.97); }
+
+.btn-neon-filled {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.75rem;
+  font-weight: 600;
+  font-size: 0.875rem;
+  background: #00FFB2;
+  color: #080B0F;
+  border: none;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+.btn-neon-filled:hover {
+  box-shadow: 0 0 40px rgba(0, 255, 178, 0.25);
+  filter: brightness(1.1);
+}
+.btn-neon-filled:active { transform: scale(0.97); }
+
+.section-label {
+  color: #64748B;
+  font-size: 0.75rem;
+  font-family: "JetBrains Mono", monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.stat-value {
+  font-size: 2.25rem;
+  font-family: "Inter", system-ui, sans-serif;
+  font-weight: 700;
+  color: white;
+  font-variant-numeric: tabular-nums;
+}
+
+.bg-hero-gradient {
+  background: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(0, 255, 178, 0.06) 0%, transparent 60%);
+}
+
+.bg-neon-glow {
+  background: radial-gradient(ellipse at center, rgba(0, 255, 178, 0.08) 0%, transparent 70%);
+}
+
+.bg-grid-pattern {
+  background-image:
+    linear-gradient(rgba(30, 41, 59, 0.3) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30, 41, 59, 0.3) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
