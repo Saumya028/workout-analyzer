@@ -1,35 +1,48 @@
 # backend/rep_detection/detector.py
 # ──────────────────────────────────────────────────────────────────────────────
-# Rep Detection Pipeline
-#   1. Extract primary axis from sensor frames
-#   2. Remove gravity bias (subtract mean)
-#   3. Smooth with moving average
-#   4. Normalize to [-1, +1]
-#   5. Detect peaks/troughs with scipy.signal.find_peaks
-#   6. Segment into full rep cycles
-#   7. Score each rep against golden template via DTW
+# 3-D Rep Detection Pipeline
+#   1. Extract full (ax, ay, az) trajectory from sensor frames
+#   2. Remove gravity bias (subtract per-axis mean)
+#   3. Smooth each axis with moving average
+#   4. Per-axis normalise to [−1, +1]
+#   5. Compute resultant magnitude for peak/trough detection (1-D)
+#   6. Detect peaks/troughs with scipy.signal.find_peaks on resultant
+#   7. Segment the *3-D trajectory* using peak/trough indices
+#   8. Score each 3-D segment against the golden template via 3-D DTW
 # ──────────────────────────────────────────────────────────────────────────────
 
 import numpy as np
 from scipy.signal import find_peaks
 
-from .signal_utils import moving_average, normalize, extract_axis
+from .signal_utils import (
+    extract_3d_trajectory,
+    moving_average_3d,
+    normalize_3d,
+    resultant_magnitude,
+    moving_average,
+    normalize,
+)
 from ..golden_rep_engine.templates import GOLDEN_REP_TEMPLATES
 from ..golden_rep_engine.comparator import dtw_distance, dtw_to_accuracy
 
 
-def _segment_reps(
-    signal: np.ndarray,
+def _segment_reps_3d(
+    trajectory_3d: np.ndarray,
+    resultant_1d: np.ndarray,
     peak_indices: np.ndarray,
     trough_indices: np.ndarray,
     min_samples: int,
 ) -> list[np.ndarray]:
     """
-    Segment a signal into full rep cycles using alternating peak/trough pairs.
-    A full rep = peak → trough → peak (or trough → peak → trough).
+    Segment a 3-D trajectory (N, 3) into full rep cycles using alternating
+    peak/trough pairs detected on the 1-D resultant magnitude.
+
+    A full rep = peak → trough → peak  (or trough → peak → trough).
+
+    Returns a list of (M_i, 3) sub-arrays — one per detected rep.
     """
     # Merge peaks and troughs into an ordered list of extrema
-    extrema = []
+    extrema: list[tuple[str, int]] = []
     for idx in peak_indices:
         extrema.append(("peak", int(idx)))
     for idx in trough_indices:
@@ -44,7 +57,7 @@ def _segment_reps(
         t2, i2 = extrema[i + 1]
         t3, i3 = extrema[i + 2]
 
-        # We need alternating types: peak-trough-peak or trough-peak-trough
+        # Need alternating types: peak-trough-peak or trough-peak-trough
         if t1 == t2 or t2 == t3:
             i += 1
             continue
@@ -53,7 +66,8 @@ def _segment_reps(
             i += 1
             continue
 
-        segments.append(signal[i1: i3 + 1])
+        # Slice the 3-D trajectory for this rep cycle
+        segments.append(trajectory_3d[i1: i3 + 1])
         i += 2  # consume the triplet
 
     # Fallback: if no full cycles, use half-cycles
@@ -63,7 +77,7 @@ def _segment_reps(
             t2, i2 = extrema[j + 1]
             if t1 == t2:
                 continue
-            seg = signal[i1: i2 + 1]
+            seg = trajectory_3d[i1: i2 + 1]
             if len(seg) >= min_samples:
                 segments.append(seg)
 
@@ -75,7 +89,7 @@ def analyze_workout(
     exercise_key: str,
 ) -> dict:
     """
-    Full rep detection and accuracy analysis.
+    Full 3-D rep detection and accuracy analysis.
 
     Parameters
     ----------
@@ -86,8 +100,10 @@ def analyze_workout(
 
     Returns
     -------
-    dict with keys: reps, accuracy, rep_scores, detected_segments,
-                    golden_signal, user_signals
+    dict with keys:
+        reps, accuracy, rep_scores, detected_segments,
+        golden_signal   —  3-D golden template (list of [ax,ay,az])
+        user_signals    —  list of per-rep 3-D trajectories
     """
     template = GOLDEN_REP_TEMPLATES.get(exercise_key)
     if not template or len(frames) < 20:
@@ -97,16 +113,25 @@ def analyze_workout(
             "user_signals": [],
         }
 
-    # 1. Extract primary axis and remove gravity bias
-    raw = extract_axis(frames, template["primary_axis"])
-    mean = float(np.mean(raw))
-    debiased = raw - mean
+    # ── 1. Extract full 3-axis trajectory ────────────────────────────────
+    raw_3d = extract_3d_trajectory(frames)  # (N, 3)
 
-    # 2. Smooth + normalize
-    smoothed = moving_average(debiased, 7)
-    normalized = normalize(smoothed)
+    # ── 2. Remove gravity bias (per-axis mean subtraction) ───────────────
+    means = np.mean(raw_3d, axis=0)  # (3,)
+    debiased_3d = raw_3d - means
 
-    # 3. Estimate sample rate
+    # ── 3. Smooth each axis ──────────────────────────────────────────────
+    smoothed_3d = moving_average_3d(debiased_3d, 7)  # (N, 3)
+
+    # ── 4. Per-axis normalise to [−1, +1] ────────────────────────────────
+    normed_3d = normalize_3d(smoothed_3d)  # (N, 3)
+
+    # ── 5. Compute 1-D resultant for peak detection ──────────────────────
+    resultant = resultant_magnitude(normed_3d)  # (N,)
+    resultant_smooth = moving_average(resultant, 5)
+    resultant_norm = normalize(resultant_smooth)
+
+    # ── 6. Estimate sample rate ──────────────────────────────────────────
     times = np.array([f.get("time", 0) for f in frames], dtype=float)
     dur_ms = times[-1] - times[0] if len(times) > 1 else len(frames) * 20
     hz = (len(frames) / dur_ms) * 1000 if dur_ms > 0 else 50
@@ -114,59 +139,69 @@ def analyze_workout(
     min_samples_per_rep = max(8, int(hz * template["expected_duration_ms"][0] / 1000))
     min_peak_dist = max(5, int(hz * 0.4))
 
-    # 4. Detect peaks and troughs
+    # ── 7. Detect peaks and troughs on the resultant ─────────────────────
     peak_prom = template["peak_threshold"]
-    peaks, _ = find_peaks(normalized, prominence=peak_prom, distance=min_peak_dist)
-    troughs, _ = find_peaks(-normalized, prominence=peak_prom, distance=min_peak_dist)
+    peaks, _ = find_peaks(resultant_norm, prominence=peak_prom, distance=min_peak_dist)
+    troughs, _ = find_peaks(-resultant_norm, prominence=peak_prom, distance=min_peak_dist)
 
     # Relax threshold if too few
     if len(peaks) + len(troughs) < 4:
-        peaks, _ = find_peaks(normalized, prominence=peak_prom * 0.5, distance=min_peak_dist)
-        troughs, _ = find_peaks(-normalized, prominence=peak_prom * 0.5, distance=min_peak_dist)
+        peaks, _ = find_peaks(resultant_norm, prominence=peak_prom * 0.5, distance=min_peak_dist)
+        troughs, _ = find_peaks(-resultant_norm, prominence=peak_prom * 0.5, distance=min_peak_dist)
 
     if len(peaks) + len(troughs) < 2:
         return {
             "reps": 0, "accuracy": 0, "rep_scores": [],
             "detected_segments": 0,
-            "golden_signal": template["signal"],
+            "golden_signal": template["signal_3d"],
             "user_signals": [],
         }
 
-    # 5. Segment into reps
-    segments = _segment_reps(normalized, peaks, troughs, min_samples_per_rep)
+    # ── 8. Segment the 3-D trajectory ────────────────────────────────────
+    segments = _segment_reps_3d(
+        normed_3d, resultant_norm, peaks, troughs, min_samples_per_rep,
+    )
 
     if len(segments) == 0:
-        # Absolute fallback: count alternating peak pairs
+        # Fallback: estimate from half-cycle count
         half_cycles = max(len(peaks), len(troughs))
         if half_cycles == 0:
             return {
                 "reps": 0, "accuracy": 0, "rep_scores": [],
                 "detected_segments": 0,
-                "golden_signal": template["signal"],
+                "golden_signal": template["signal_3d"],
                 "user_signals": [],
             }
-        sig_range = float(np.max(normalized) - np.min(normalized))
+        sig_range = float(np.max(resultant_norm) - np.min(resultant_norm))
         rough = min(100, round(sig_range * 55))
         return {
             "reps": half_cycles,
             "accuracy": rough,
             "rep_scores": [rough] * half_cycles,
             "detected_segments": half_cycles,
-            "golden_signal": template["signal"],
+            "golden_signal": template["signal_3d"],
             "user_signals": [],
         }
 
-    # 6. DTW score each segment vs golden template
-    golden = normalize(np.array(template["signal"], dtype=float))
-    rep_scores = []
-    user_signals = []
+    # ── 9. 3-D DTW scoring ───────────────────────────────────────────────
+    golden_3d = np.array(template["signal_3d"], dtype=float)  # (60, 3)
+
+    # Per-axis normalise the golden template
+    golden_normed = np.empty_like(golden_3d)
+    for axis in range(golden_3d.shape[1]):
+        col = golden_3d[:, axis]
+        max_abs = np.max(np.abs(col))
+        golden_normed[:, axis] = col / max_abs if max_abs > 0 else col
+
+    rep_scores: list[int] = []
+    user_signals: list[list[list[float]]] = []
 
     for seg in segments:
-        seg_norm = normalize(seg)
-        dist = dtw_distance(seg_norm, golden)
+        seg_normed = normalize_3d(seg)  # (M, 3) per-axis normalised
+        dist = dtw_distance(seg_normed, golden_normed)
         score = dtw_to_accuracy(dist)
         rep_scores.append(score)
-        user_signals.append(seg_norm.tolist())
+        user_signals.append(seg_normed.tolist())
 
     accuracy = round(sum(rep_scores) / len(rep_scores)) if rep_scores else 0
 
@@ -175,6 +210,6 @@ def analyze_workout(
         "accuracy": accuracy,
         "rep_scores": rep_scores,
         "detected_segments": len(segments),
-        "golden_signal": template["signal"],
+        "golden_signal": template["signal_3d"],
         "user_signals": user_signals,
     }

@@ -1,6 +1,6 @@
 # backend/rep_detection/signal_utils.py
 # ──────────────────────────────────────────────────────────────────────────────
-# Signal processing utilities for sensor data.
+# Signal processing utilities for sensor data — supports both 1-D and 3-D.
 # ──────────────────────────────────────────────────────────────────────────────
 
 import math
@@ -9,18 +9,19 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+# ── 1-D utilities (retained for backward compat / peak detection) ─────────────
+
 def moving_average(signal: NDArray, window: int = 7) -> NDArray:
     """Apply a centred moving-average smooth to a 1-D signal."""
     if len(signal) == 0:
         return signal
     kernel = np.ones(window) / window
-    # Pad edges to keep the same length
     padded = np.pad(signal, (window // 2, window // 2), mode="edge")
     return np.convolve(padded, kernel, mode="valid")[: len(signal)]
 
 
 def normalize(signal: NDArray) -> NDArray:
-    """Normalise a signal to [-1, +1] range."""
+    """Normalise a 1-D signal to [-1, +1] range."""
     if len(signal) == 0:
         return signal
     max_abs = np.max(np.abs(signal))
@@ -33,6 +34,65 @@ def extract_axis(frames: list[dict], axis: str) -> NDArray:
     """Extract a single axis (e.g. 'ay') from a list of sensor frames."""
     return np.array([f.get(axis, 0.0) for f in frames], dtype=float)
 
+
+# ── 3-D utilities ────────────────────────────────────────────────────────────
+
+def extract_3d_trajectory(frames: list[dict]) -> NDArray:
+    """
+    Extract the full 3-axis accelerometer trajectory from sensor frames.
+
+    Returns
+    -------
+    NDArray of shape (N, 3)  — columns are [ax, ay, az].
+    """
+    return np.array(
+        [[f.get("ax", 0.0), f.get("ay", 0.0), f.get("az", 0.0)] for f in frames],
+        dtype=float,
+    )
+
+
+def moving_average_3d(trajectory: NDArray, window: int = 7) -> NDArray:
+    """
+    Apply a centred moving-average smooth to each axis of a (N, 3) trajectory
+    independently.  Returns an (N, 3) array.
+    """
+    if len(trajectory) == 0:
+        return trajectory
+    out = np.empty_like(trajectory)
+    for axis in range(trajectory.shape[1]):
+        out[:, axis] = moving_average(trajectory[:, axis], window)
+    return out
+
+
+def normalize_3d(trajectory: NDArray) -> NDArray:
+    """
+    Per-axis magnitude normalisation for a (N, 3) trajectory.
+    Each axis is independently scaled to [−1, +1].
+    """
+    if len(trajectory) == 0:
+        return trajectory
+    out = np.empty_like(trajectory)
+    for axis in range(trajectory.shape[1]):
+        col = trajectory[:, axis]
+        max_abs = np.max(np.abs(col))
+        out[:, axis] = col / max_abs if max_abs > 0 else np.zeros_like(col)
+    return out
+
+
+def resultant_magnitude(trajectory: NDArray) -> NDArray:
+    """
+    Compute the resultant acceleration magnitude for each sample:
+        r[i] = √(ax² + ay² + az²)
+
+    This 1-D signal is useful for peak detection because it captures the
+    total movement energy regardless of direction.
+
+    Returns a 1-D array of shape (N,).
+    """
+    return np.linalg.norm(trajectory, axis=1)
+
+
+# ── Test-data generator ──────────────────────────────────────────────────────
 
 def generate_test_data(exercise_key: str, num_reps: int = 5) -> list[dict]:
     """
