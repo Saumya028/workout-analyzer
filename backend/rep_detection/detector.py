@@ -1,47 +1,48 @@
 # backend/rep_detection/detector.py
 # ──────────────────────────────────────────────────────────────────────────────
-# 3-D Rep Detection Pipeline
-#   1. Extract full (ax, ay, az) trajectory from sensor frames
-#   2. Remove gravity bias (subtract per-axis mean)
+# 6-D Rep Detection Pipeline
+#   1. Extract full (ax, ay, az, gx, gy, gz) trajectory from sensor frames
+#   2. Remove bias (subtract per-axis mean)
 #   3. Smooth each axis with moving average
-#   4. Per-axis normalise to [−1, +1]
-#   5. Compute resultant magnitude for peak/trough detection (1-D)
+#   4. Per-axis normalise to [-1, +1]
+#   5. Compute resultant magnitude (accel only) for peak/trough detection
 #   6. Detect peaks/troughs with scipy.signal.find_peaks on resultant
-#   7. Segment the *3-D trajectory* using peak/trough indices
-#   8. Score each 3-D segment against the golden template via 3-D DTW
+#   7. Segment the *6-D trajectory* using peak/trough indices
+#   8. Score each 6-D segment against the golden template via 6-D DTW
 # ──────────────────────────────────────────────────────────────────────────────
 
 import numpy as np
 from scipy.signal import find_peaks
 
 from .signal_utils import (
+    extract_6d_trajectory,
     extract_3d_trajectory,
-    moving_average_3d,
-    normalize_3d,
+    moving_average_nd,
+    normalize_nd,
     resultant_magnitude,
     moving_average,
     normalize,
 )
 from ..golden_rep_engine.templates import GOLDEN_REP_TEMPLATES
 from ..golden_rep_engine.comparator import dtw_distance, dtw_to_accuracy
+from ..golden_rep_engine.calibration import get_golden_signal_6d
 
 
-def _segment_reps_3d(
-    trajectory_3d: np.ndarray,
+def _segment_reps_nd(
+    trajectory_nd: np.ndarray,
     resultant_1d: np.ndarray,
     peak_indices: np.ndarray,
     trough_indices: np.ndarray,
     min_samples: int,
 ) -> list[np.ndarray]:
     """
-    Segment a 3-D trajectory (N, 3) into full rep cycles using alternating
+    Segment an N-D trajectory (N, D) into full rep cycles using alternating
     peak/trough pairs detected on the 1-D resultant magnitude.
 
-    A full rep = peak → trough → peak  (or trough → peak → trough).
+    A full rep = peak -> trough -> peak  (or trough -> peak -> trough).
 
-    Returns a list of (M_i, 3) sub-arrays — one per detected rep.
+    Returns a list of (M_i, D) sub-arrays — one per detected rep.
     """
-    # Merge peaks and troughs into an ordered list of extrema
     extrema: list[tuple[str, int]] = []
     for idx in peak_indices:
         extrema.append(("peak", int(idx)))
@@ -57,7 +58,6 @@ def _segment_reps_3d(
         t2, i2 = extrema[i + 1]
         t3, i3 = extrema[i + 2]
 
-        # Need alternating types: peak-trough-peak or trough-peak-trough
         if t1 == t2 or t2 == t3:
             i += 1
             continue
@@ -66,9 +66,8 @@ def _segment_reps_3d(
             i += 1
             continue
 
-        # Slice the 3-D trajectory for this rep cycle
-        segments.append(trajectory_3d[i1: i3 + 1])
-        i += 2  # consume the triplet
+        segments.append(trajectory_nd[i1: i3 + 1])
+        i += 2
 
     # Fallback: if no full cycles, use half-cycles
     if len(segments) == 0:
@@ -77,7 +76,7 @@ def _segment_reps_3d(
             t2, i2 = extrema[j + 1]
             if t1 == t2:
                 continue
-            seg = trajectory_3d[i1: i2 + 1]
+            seg = trajectory_nd[i1: i2 + 1]
             if len(seg) >= min_samples:
                 segments.append(seg)
 
@@ -89,7 +88,7 @@ def analyze_workout(
     exercise_key: str,
 ) -> dict:
     """
-    Full 3-D rep detection and accuracy analysis.
+    Full 6-D rep detection and accuracy analysis.
 
     Parameters
     ----------
@@ -102,8 +101,8 @@ def analyze_workout(
     -------
     dict with keys:
         reps, accuracy, rep_scores, detected_segments,
-        golden_signal   —  3-D golden template (list of [ax,ay,az])
-        user_signals    —  list of per-rep 3-D trajectories
+        golden_signal   —  6-D golden template (list of [ax,ay,az,gx,gy,gz])
+        user_signals    —  list of per-rep 6-D trajectories
     """
     template = GOLDEN_REP_TEMPLATES.get(exercise_key)
     if not template or len(frames) < 20:
@@ -113,91 +112,64 @@ def analyze_workout(
             "user_signals": [],
         }
 
-    # ── 1. Extract full 3-axis trajectory ────────────────────────────────
-    raw_3d = extract_3d_trajectory(frames)  # (N, 3)
-
-    # ── 2. Remove gravity bias (per-axis mean subtraction) ───────────────
-    means = np.mean(raw_3d, axis=0)  # (3,)
-    debiased_3d = raw_3d - means
-
-    # ── 3. Smooth each axis ──────────────────────────────────────────────
-    smoothed_3d = moving_average_3d(debiased_3d, 7)  # (N, 3)
-
-    # ── 4. Per-axis normalise to [−1, +1] ────────────────────────────────
-    normed_3d = normalize_3d(smoothed_3d)  # (N, 3)
-
-    # ── 5. Compute 1-D resultant for peak detection ──────────────────────
-    resultant = resultant_magnitude(normed_3d)  # (N,)
-    resultant_smooth = moving_average(resultant, 5)
-    resultant_norm = normalize(resultant_smooth)
-
-    # ── 6. Estimate sample rate ──────────────────────────────────────────
+    # ── 1. Estimate sample rate ────────────────────────────────────────
     times = np.array([f.get("time", 0) for f in frames], dtype=float)
     dur_ms = times[-1] - times[0] if len(times) > 1 else len(frames) * 20
     hz = (len(frames) / dur_ms) * 1000 if dur_ms > 0 else 50
 
-    min_samples_per_rep = max(8, int(hz * template["expected_duration_ms"][0] / 1000))
-    min_peak_dist = max(5, int(hz * 0.4))
+    # ── 2. Peak detection on raw accel magnitude (debiased + smoothed) ──
+    #    Raw magnitude is more robust than normalized 6D resultant which
+    #    distorts amplitudes and creates spurious sub-rep peaks.
+    accel = np.array([[f["ax"], f["ay"], f["az"]] for f in frames], dtype=float)
+    raw_mag = np.linalg.norm(accel, axis=1)
+    mag_debiased = raw_mag - np.mean(raw_mag)
+    mag_smoothed = moving_average(mag_debiased, 21)
+    mag_max = np.max(np.abs(mag_smoothed))
+    mag_norm = mag_smoothed / mag_max if mag_max > 0 else mag_smoothed
 
-    # ── 7. Detect peaks and troughs on the resultant ─────────────────────
-    peak_prom = template["peak_threshold"]
-    peaks, _ = find_peaks(resultant_norm, prominence=peak_prom, distance=min_peak_dist)
-    troughs, _ = find_peaks(-resultant_norm, prominence=peak_prom, distance=min_peak_dist)
+    # ── 3. Find rep peaks — each local maximum = one rep ────────────────
+    #    minPeakDist: 80% of expected rep duration (floor: 1.8 seconds).
+    #    minHeight: 0.25 of normalized signal to ignore noise floor.
+    min_peak_dist = max(
+        int(hz * 1.8),
+        int(hz * template["expected_duration_ms"][0] / 1000 * 0.8),
+    )
+    peaks, _ = find_peaks(mag_norm, height=0.25, distance=min_peak_dist)
 
-    # Relax threshold if too few
-    if len(peaks) + len(troughs) < 4:
-        peaks, _ = find_peaks(resultant_norm, prominence=peak_prom * 0.5, distance=min_peak_dist)
-        troughs, _ = find_peaks(-resultant_norm, prominence=peak_prom * 0.5, distance=min_peak_dist)
-
-    if len(peaks) + len(troughs) < 2:
+    if len(peaks) == 0:
         return {
             "reps": 0, "accuracy": 0, "rep_scores": [],
             "detected_segments": 0,
-            "golden_signal": template["signal_3d"],
+            "golden_signal": template["signal_6d"],
             "user_signals": [],
         }
 
-    # ── 8. Segment the 3-D trajectory ────────────────────────────────────
-    segments = _segment_reps_3d(
-        normed_3d, resultant_norm, peaks, troughs, min_samples_per_rep,
-    )
+    # ── 4. Extract 6-axis trajectory for DTW scoring ────────────────────
+    raw_6d = extract_6d_trajectory(frames)
+    means = np.mean(raw_6d, axis=0)
+    debiased_6d = raw_6d - means
+    smoothed_6d = moving_average_nd(debiased_6d, 11)
+    normed_6d = normalize_nd(smoothed_6d)
 
-    if len(segments) == 0:
-        # Fallback: estimate from half-cycle count
-        half_cycles = max(len(peaks), len(troughs))
-        if half_cycles == 0:
-            return {
-                "reps": 0, "accuracy": 0, "rep_scores": [],
-                "detected_segments": 0,
-                "golden_signal": template["signal_3d"],
-                "user_signals": [],
-            }
-        sig_range = float(np.max(resultant_norm) - np.min(resultant_norm))
-        rough = min(100, round(sig_range * 55))
-        return {
-            "reps": half_cycles,
-            "accuracy": rough,
-            "rep_scores": [rough] * half_cycles,
-            "detected_segments": half_cycles,
-            "golden_signal": template["signal_3d"],
-            "user_signals": [],
-        }
+    # ── 5. Segment around each peak for DTW scoring ─────────────────────
+    segments: list[np.ndarray] = []
+    n = len(normed_6d)
+    for i, pk in enumerate(peaks):
+        start = 0 if i == 0 else (peaks[i - 1] + pk) // 2
+        end = n if i == len(peaks) - 1 else (pk + peaks[i + 1]) // 2
+        if end - start >= 4:
+            segments.append(normed_6d[start:end])
 
-    # ── 9. 3-D DTW scoring ───────────────────────────────────────────────
-    golden_3d = np.array(template["signal_3d"], dtype=float)  # (60, 3)
-
-    # Per-axis normalise the golden template
-    golden_normed = np.empty_like(golden_3d)
-    for axis in range(golden_3d.shape[1]):
-        col = golden_3d[:, axis]
-        max_abs = np.max(np.abs(col))
-        golden_normed[:, axis] = col / max_abs if max_abs > 0 else col
+    # ── 6. 6-D DTW scoring (prefer user calibration if available) ──────
+    golden_signal = get_golden_signal_6d(exercise_key)
+    golden_6d = np.array(golden_signal, dtype=float)  # (60, 6)
+    golden_normed = normalize_nd(golden_6d)
 
     rep_scores: list[int] = []
     user_signals: list[list[list[float]]] = []
 
     for seg in segments:
-        seg_normed = normalize_3d(seg)  # (M, 3) per-axis normalised
+        seg_normed = normalize_nd(seg)  # (M, 6)
         dist = dtw_distance(seg_normed, golden_normed)
         score = dtw_to_accuracy(dist)
         rep_scores.append(score)
@@ -210,6 +182,6 @@ def analyze_workout(
         "accuracy": accuracy,
         "rep_scores": rep_scores,
         "detected_segments": len(segments),
-        "golden_signal": template["signal_3d"],
+        "golden_signal": template["signal_6d"],
         "user_signals": user_signals,
     }

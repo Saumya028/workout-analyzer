@@ -1,34 +1,39 @@
 # backend/api/websocket.py
 # ──────────────────────────────────────────────────────────────────────────────
-# WebSocket endpoint for real-time sensor data streaming.
-# Clients connect, send sensor frames, and receive live rep detection results.
+# WebSocket endpoint for real-time sensor data streaming with live rep feedback.
+#
+# Protocol:
+#   Client -> { "action": "start", "exercise": "squats" }
+#   Client -> { "action": "frame", "data": { ...SensorFrame } }  (streamed)
+#   Server <- { "type": "rep_detected", repNumber, score, totalReps, avgAccuracy }
+#   Client -> { "action": "stop" }
+#   Server <- { "type": "result", reps, accuracy, repScores, ... }
 # ──────────────────────────────────────────────────────────────────────────────
 
 import json
+import logging
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..rep_detection.detector import analyze_workout
 from ..golden_rep_engine.templates import EXERCISE_KEYS
 
+logger = logging.getLogger(__name__)
+
 ws_router = APIRouter()
+
+# How often (in frames) to run incremental analysis during recording
+_ANALYSIS_INTERVAL = 30
 
 
 @ws_router.websocket("/ws/workout")
-async def workout_websocket(websocket: WebSocket):
-    """
-    WebSocket protocol:
-    ───────────────────
-    1. Client sends JSON: { "action": "start", "exercise": "squats" }
-    2. Client streams frames: { "action": "frame", "data": { ...SensorFrame } }
-    3. Client sends: { "action": "stop" }
-    4. Server responds with analysis results.
-
-    Server may also send intermediate updates (frame count, live stats).
-    """
+async def workout_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
     exercise = "squats"
     frames: list[dict] = []
     recording = False
+    last_rep_count = 0
+    last_rep_scores: list[int] = []
 
     try:
         while True:
@@ -47,6 +52,8 @@ async def workout_websocket(websocket: WebSocket):
 
                 frames = []
                 recording = True
+                last_rep_count = 0
+                last_rep_scores = []
                 await websocket.send_json({
                     "type": "started",
                     "exercise": exercise,
@@ -57,8 +64,48 @@ async def workout_websocket(websocket: WebSocket):
                 data = msg.get("data", {})
                 frames.append(data)
 
-                # Send periodic updates every 50 frames
-                if len(frames) % 50 == 0:
+                # ── Incremental analysis for real-time rep feedback ───────
+                if len(frames) >= 40 and len(frames) % _ANALYSIS_INTERVAL == 0:
+                    try:
+                        live = analyze_workout(frames, exercise)
+                        new_reps = live["reps"]
+                        new_scores = live["rep_scores"]
+
+                        # Detect newly completed reps
+                        if new_reps > last_rep_count and len(new_scores) > len(last_rep_scores):
+                            for i in range(len(last_rep_scores), len(new_scores)):
+                                avg = (
+                                    round(sum(new_scores[: i + 1]) / (i + 1))
+                                    if new_scores[: i + 1]
+                                    else 0
+                                )
+                                await websocket.send_json({
+                                    "type": "rep_detected",
+                                    "repNumber": i + 1,
+                                    "score": new_scores[i],
+                                    "totalReps": new_reps,
+                                    "avgAccuracy": avg,
+                                })
+
+                            last_rep_count = new_reps
+                            last_rep_scores = list(new_scores)
+
+                        # Periodic progress update
+                        await websocket.send_json({
+                            "type": "progress",
+                            "frameCount": len(frames),
+                            "liveReps": new_reps,
+                            "liveAccuracy": live["accuracy"],
+                        })
+                    except Exception as e:
+                        logger.warning("Incremental analysis failed: %s", e)
+                        await websocket.send_json({
+                            "type": "progress",
+                            "frameCount": len(frames),
+                        })
+
+                # Lightweight progress every 50 frames when not analysing
+                elif len(frames) % 50 == 0:
                     await websocket.send_json({
                         "type": "progress",
                         "frameCount": len(frames),
@@ -74,7 +121,7 @@ async def workout_websocket(websocket: WebSocket):
                     })
                     continue
 
-                # Run analysis
+                # Final analysis
                 analysis = analyze_workout(frames, exercise)
                 await websocket.send_json({
                     "type": "result",
@@ -87,6 +134,8 @@ async def workout_websocket(websocket: WebSocket):
                     "frameCount": len(frames),
                 })
                 frames = []
+                last_rep_count = 0
+                last_rep_scores = []
 
             elif action == "ping":
                 await websocket.send_json({"type": "pong"})

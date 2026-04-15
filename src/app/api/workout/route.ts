@@ -5,6 +5,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import connectToDatabase from '@/lib/db';
 import Workout from '@/models/Workout';
+import GoldenRep from '@/models/GoldenRep';
 import { analyzeWorkout } from '@/lib/repDetection';
 import { ExerciseKey } from '@/lib/goldenRepTemplates';
 import type { SensorFrame } from '@/lib/sensorService';
@@ -57,8 +58,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       `[API] Processing workout: exercise=${body.exercise}, frames=${body.sensorData.length}`
     );
 
+    // ── Fetch personal golden rep (if calibrated) ────────────────────────────
+    await connectToDatabase();
+    let userGoldenRep6D: number[][] | undefined;
+    try {
+      const goldenRep = await GoldenRep.findOne({ exercise: body.exercise })
+        .select('signal6D')
+        .lean();
+      if (goldenRep?.signal6D) {
+        userGoldenRep6D = goldenRep.signal6D;
+        console.log(`[API] Using personal golden rep for ${body.exercise}`);
+      }
+    } catch { /* fall back to default template */ }
+
     // ── Rep Detection & Analysis ──────────────────────────────────────────────
-    const analysis = analyzeWorkout(body.sensorData, body.exercise);
+    const analysis = analyzeWorkout(body.sensorData, body.exercise, userGoldenRep6D);
 
     console.log(
       `[API] Analysis result: reps=${analysis.reps}, accuracy=${analysis.accuracy}%, ` +
@@ -73,7 +87,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         : 0;
 
     // ── Persist to MongoDB ────────────────────────────────────────────────────
-    await connectToDatabase();
+    // (connection already established above for golden rep lookup)
 
     // Downsample sensor data to max 500 frames for storage efficiency
     const storageFrames =
