@@ -1,15 +1,16 @@
 # backend/rep_detection/signal_utils.py
 # ──────────────────────────────────────────────────────────────────────────────
-# Signal processing utilities for sensor data — supports both 1-D and 3-D.
+# Signal processing utilities for sensor data — supports 1-D, 3-D, and 6-D.
 # ──────────────────────────────────────────────────────────────────────────────
 
 import math
 import random
+
 import numpy as np
 from numpy.typing import NDArray
 
 
-# ── 1-D utilities (retained for backward compat / peak detection) ─────────────
+# ── 1-D utilities (retained for peak detection on resultant) ─────────────────
 
 def moving_average(signal: NDArray, window: int = 7) -> NDArray:
     """Apply a centred moving-average smooth to a 1-D signal."""
@@ -35,15 +36,12 @@ def extract_axis(frames: list[dict], axis: str) -> NDArray:
     return np.array([f.get(axis, 0.0) for f in frames], dtype=float)
 
 
-# ── 3-D utilities ────────────────────────────────────────────────────────────
+# ── N-D utilities ────────────────────────────────────────────────────────────
 
 def extract_3d_trajectory(frames: list[dict]) -> NDArray:
     """
     Extract the full 3-axis accelerometer trajectory from sensor frames.
-
-    Returns
-    -------
-    NDArray of shape (N, 3)  — columns are [ax, ay, az].
+    Returns NDArray of shape (N, 3) — columns are [ax, ay, az].
     """
     return np.array(
         [[f.get("ax", 0.0), f.get("ay", 0.0), f.get("az", 0.0)] for f in frames],
@@ -51,10 +49,35 @@ def extract_3d_trajectory(frames: list[dict]) -> NDArray:
     )
 
 
-def moving_average_3d(trajectory: NDArray, window: int = 7) -> NDArray:
+def extract_6d_trajectory(frames: list[dict]) -> NDArray:
     """
-    Apply a centred moving-average smooth to each axis of a (N, 3) trajectory
-    independently.  Returns an (N, 3) array.
+    Extract the full 6-axis trajectory from sensor frames.
+    Returns NDArray of shape (N, 6) — columns are [ax, ay, az, gx, gy, gz].
+
+    Gyroscope values are scaled by GYRO_SCALE to bring them into a comparable
+    range with accelerometer values (typically deg/s vs m/s²).
+    """
+    GYRO_SCALE = 0.01  # 1 deg/s → 0.01 normalised units
+    return np.array(
+        [
+            [
+                f.get("ax", 0.0),
+                f.get("ay", 0.0),
+                f.get("az", 0.0),
+                f.get("gx", 0.0) * GYRO_SCALE,
+                f.get("gy", 0.0) * GYRO_SCALE,
+                f.get("gz", 0.0) * GYRO_SCALE,
+            ]
+            for f in frames
+        ],
+        dtype=float,
+    )
+
+
+def moving_average_nd(trajectory: NDArray, window: int = 7) -> NDArray:
+    """
+    Apply a centred moving-average smooth to each axis of a (N, D) trajectory
+    independently.  Returns an (N, D) array.
     """
     if len(trajectory) == 0:
         return trajectory
@@ -64,10 +87,14 @@ def moving_average_3d(trajectory: NDArray, window: int = 7) -> NDArray:
     return out
 
 
-def normalize_3d(trajectory: NDArray) -> NDArray:
+# Keep old name as alias
+moving_average_3d = moving_average_nd
+
+
+def normalize_nd(trajectory: NDArray) -> NDArray:
     """
-    Per-axis magnitude normalisation for a (N, 3) trajectory.
-    Each axis is independently scaled to [−1, +1].
+    Per-axis magnitude normalisation for a (N, D) trajectory.
+    Each axis is independently scaled to [-1, +1].
     """
     if len(trajectory) == 0:
         return trajectory
@@ -79,14 +106,17 @@ def normalize_3d(trajectory: NDArray) -> NDArray:
     return out
 
 
+# Keep old name as alias
+normalize_3d = normalize_nd
+
+
 def resultant_magnitude(trajectory: NDArray) -> NDArray:
     """
     Compute the resultant acceleration magnitude for each sample:
-        r[i] = √(ax² + ay² + az²)
+        r[i] = sqrt(sum(x^2 for x in row))
 
     This 1-D signal is useful for peak detection because it captures the
     total movement energy regardless of direction.
-
     Returns a 1-D array of shape (N,).
     """
     return np.linalg.norm(trajectory, axis=1)

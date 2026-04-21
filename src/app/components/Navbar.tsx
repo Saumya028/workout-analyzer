@@ -17,6 +17,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { href: '/',          label: 'Home',            icon: '🏠' },
   { href: '/workout',   label: 'Live Workout',    icon: '⚡' },
+  { href: '/calibrate', label: 'Calibrate',       icon: '🎯' },
   { href: '/analytics', label: 'Rep Analytics',   icon: '📊' },
   { href: '/viewer',    label: '3D Motion',       icon: '🧊' },
   { href: '/exercises', label: 'Exercise Library', icon: '📚' },

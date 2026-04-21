@@ -36,6 +36,16 @@ yarn-error.log*
 # vercel
 .vercel
 
+# binaries
+ngrok.exe
+ngrok
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+backend/data/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

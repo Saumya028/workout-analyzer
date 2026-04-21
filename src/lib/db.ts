@@ -3,13 +3,6 @@ import mongoose from "mongoose";
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
-if (!MONGODB_URI) {
-  throw new Error(
-    "MONGODB_URI is not defined. Add it to your .env.local file:\n" +
-    "MONGODB_URI=mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/workout_analyzer?retryWrites=true&w=majority"
-  );
-}
-
 interface Cache {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
@@ -24,13 +17,20 @@ const cached: Cache = global.__mongoCache ?? { conn: null, promise: null };
 global.__mongoCache = cached;
 
 export async function connectToDatabase(): Promise<typeof mongoose> {
+  if (!MONGODB_URI) {
+    throw new Error(
+      "MONGODB_URI is not defined. Add it to your .env.local file:\n" +
+      "MONGODB_URI=mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/workout_analyzer?retryWrites=true&w=majority"
+    );
+  }
+
   if (cached.conn) {
     console.log("[DB] Reusing existing MongoDB connection");
     return cached.conn;
   }
 
   if (!cached.promise) {
-    const uri = MONGODB_URI as string;
+    const uri = MONGODB_URI;
     console.log("[DB] Creating new MongoDB connection to Atlas...");
 
     cached.promise = mongoose

@@ -1,12 +1,17 @@
 # backend/golden_rep_engine/templates.py
 # ──────────────────────────────────────────────────────────────────────────────
-# Golden Rep Templates — 60-point normalized 3D accelerometer trajectories
+# Golden Rep Templates — 60-point normalized 6D sensor trajectories
 # representing one full rep cycle for each supported exercise.
 #
-# Each point is a [ax, ay, az] triplet in the range [−1, +1].
-# The primary_axis field is retained for peak detection (resultant fallback).
+# Each point is a [ax, ay, az, gx, gy, gz] sextuplet in the range [-1, +1].
+# Gyroscope axes capture the rotational velocity profile of each exercise,
+# which is critical for detecting form issues like:
+#   - Elbow flare (bench press gx deviation)
+#   - Hip rotation asymmetry (squat/deadlift gz)
+#   - Incomplete range of motion (gyro amplitude)
 # ──────────────────────────────────────────────────────────────────────────────
 
+import math
 from typing import TypedDict
 
 
@@ -18,55 +23,99 @@ EXERCISE_KEYS = [
 
 class GoldenRepTemplate(TypedDict):
     name: str
-    primary_axis: str                       # hint for peak detection fallback
-    signal_3d: list[list[float]]            # 60 × [ax, ay, az] normalised
+    primary_axis: str
+    signal_3d: list[list[float]]            # 60 x [ax, ay, az]  (legacy compat)
+    signal_6d: list[list[float]]            # 60 x [ax, ay, az, gx, gy, gz]
     expected_duration_ms: tuple[int, int]
     peak_threshold: float
     description: str
     icon: str
 
 
-def _build_3d(
+def _build_6d(
     primary: list[float],
     secondary_scale: float = 0.15,
     tertiary_scale: float = 0.08,
     primary_idx: int = 1,
-) -> list[list[float]]:
+    gyro_profile: str = "standard",
+) -> tuple[list[list[float]], list[list[float]]]:
     """
-    Helper to construct a 60×3 signal from a 1-D primary profile.
-    Generates biomechanically plausible secondary/tertiary axes from the
-    primary signal using phase-shifted sinusoidal coupling.
+    Construct both a 60x3 and 60x6 signal from a 1-D primary profile.
 
-    Parameters
-    ----------
-    primary : 60-point primary axis profile (−1 to +1)
-    secondary_scale : amplitude of the secondary axis relative to primary
-    tertiary_scale  : amplitude of the tertiary axis relative to primary
-    primary_idx     : which column is the primary axis (0=ax, 1=ay, 2=az)
+    The gyroscope channels model the angular velocity that accompanies
+    the linear acceleration of each exercise phase:
+      - gx: rotation around the lateral axis (sagittal plane motion)
+      - gy: rotation around the vertical axis (transverse plane)
+      - gz: rotation around the anterior axis (frontal plane)
+
+    Returns (signal_3d, signal_6d).
     """
-    import math
     n = len(primary)
-    out: list[list[float]] = []
+    signal_3d: list[list[float]] = []
+    signal_6d: list[list[float]] = []
+
+    # Gyro profile parameters per exercise type
+    gyro_params = {
+        "standard":   {"gx_scale": 0.60, "gy_scale": 0.25, "gz_scale": 0.15,
+                        "gx_phase": 0.3, "gy_phase": 1.0, "gz_phase": 0.5},
+        "press":      {"gx_scale": 0.50, "gy_scale": 0.10, "gz_scale": 0.20,
+                        "gx_phase": 0.4, "gy_phase": 1.2, "gz_phase": 0.8},
+        "pull":       {"gx_scale": 0.55, "gy_scale": 0.30, "gz_scale": 0.15,
+                        "gx_phase": 0.2, "gy_phase": 0.8, "gz_phase": 0.4},
+        "hinge":      {"gx_scale": 0.70, "gy_scale": 0.15, "gz_scale": 0.25,
+                        "gx_phase": 0.1, "gy_phase": 1.5, "gz_phase": 0.6},
+        "curl":       {"gx_scale": 0.80, "gy_scale": 0.10, "gz_scale": 0.10,
+                        "gx_phase": 0.2, "gy_phase": 0.5, "gz_phase": 0.3},
+        "row":        {"gx_scale": 0.40, "gy_scale": 0.35, "gz_scale": 0.30,
+                        "gx_phase": 0.3, "gy_phase": 0.7, "gz_phase": 0.9},
+    }
+    gp = gyro_params.get(gyro_profile, gyro_params["standard"])
 
     for i in range(n):
         t = i / max(n - 1, 1)
         p = primary[i]
 
-        # Secondary: phase-shifted derivative-like coupling
+        # Accelerometer secondary/tertiary axes
         sec = secondary_scale * math.sin(2 * math.pi * t * 2.0 + 0.5) * (0.3 + abs(p))
-        # Tertiary:  slower complementary movement
         ter = tertiary_scale * math.cos(2 * math.pi * t * 1.5) * (0.2 + abs(p) * 0.5)
 
-        point = [0.0, 0.0, 0.0]
-        point[primary_idx] = p
-        point[(primary_idx + 1) % 3] = round(sec, 4)
-        point[(primary_idx + 2) % 3] = round(ter, 4)
-        out.append(point)
+        point_3d = [0.0, 0.0, 0.0]
+        point_3d[primary_idx] = p
+        point_3d[(primary_idx + 1) % 3] = round(sec, 4)
+        point_3d[(primary_idx + 2) % 3] = round(ter, 4)
 
-    return out
+        # Gyroscope: derivative-coupled angular velocity
+        # gx is primarily driven by the rate of change of the primary axis
+        dp = 0.0
+        if 0 < i < n - 1:
+            dp = (primary[i + 1] - primary[i - 1]) / 2.0
+        elif i == 0 and n > 1:
+            dp = primary[1] - primary[0]
+        elif i == n - 1 and n > 1:
+            dp = primary[-1] - primary[-2]
+
+        gx = gp["gx_scale"] * dp * 5.0 + gp["gx_scale"] * 0.2 * math.sin(
+            2 * math.pi * t * 1.5 + gp["gx_phase"]
+        )
+        gy = gp["gy_scale"] * math.sin(
+            2 * math.pi * t * 2.0 + gp["gy_phase"]
+        ) * (0.3 + abs(p))
+        gz = gp["gz_scale"] * math.cos(
+            2 * math.pi * t * 1.0 + gp["gz_phase"]
+        ) * (0.2 + abs(dp) * 2.0)
+
+        point_6d = [
+            point_3d[0], point_3d[1], point_3d[2],
+            round(gx, 4), round(gy, 4), round(gz, 4),
+        ]
+
+        signal_3d.append(point_3d)
+        signal_6d.append(point_6d)
+
+    return signal_3d, signal_6d
 
 
-# ── Raw 1-D profiles (same as v1) ────────────────────────────────────────────
+# ── Raw 1-D profiles ────────────────────────────────────────────────────────
 
 _SQUAT_1D = [
     0.00, 0.02, 0.01, -0.05, -0.12, -0.22, -0.38, -0.55,
@@ -157,90 +206,85 @@ _TRICEPS_EXT_1D = [
 ]
 
 
-# ── Build 3-D templates ──────────────────────────────────────────────────────
+# ── Build templates ──────────────────────────────────────────────────────────
+
+def _make_template(
+    name: str,
+    primary_axis: str,
+    primary_1d: list[float],
+    secondary_scale: float,
+    tertiary_scale: float,
+    primary_idx: int,
+    gyro_profile: str,
+    expected_duration_ms: tuple[int, int],
+    peak_threshold: float,
+    description: str,
+    icon: str,
+) -> GoldenRepTemplate:
+    s3d, s6d = _build_6d(
+        primary_1d, secondary_scale, tertiary_scale, primary_idx, gyro_profile,
+    )
+    return {
+        "name": name,
+        "primary_axis": primary_axis,
+        "signal_3d": s3d,
+        "signal_6d": s6d,
+        "expected_duration_ms": expected_duration_ms,
+        "peak_threshold": peak_threshold,
+        "description": description,
+        "icon": icon,
+    }
+
 
 GOLDEN_REP_TEMPLATES: dict[str, GoldenRepTemplate] = {
 
-    "squats": {
-        "name": "Squats",
-        "primary_axis": "ay",
-        "signal_3d": _build_3d(_SQUAT_1D, secondary_scale=0.18, tertiary_scale=0.10, primary_idx=1),
-        "expected_duration_ms": (2000, 5000),
-        "peak_threshold": 0.35,
-        "description": "Lower body compound — bar on traps. Phone in front pocket.",
-        "icon": "🦵",
-    },
+    "squats": _make_template(
+        "Squats", "ay", _SQUAT_1D, 0.18, 0.10, 1, "standard",
+        (2000, 5000), 0.35,
+        "Lower body compound — bar on traps. Phone in front pocket.", "🦵",
+    ),
 
-    "deadlift": {
-        "name": "Deadlift",
-        "primary_axis": "ay",
-        "signal_3d": _build_3d(_DEADLIFT_1D, secondary_scale=0.20, tertiary_scale=0.12, primary_idx=1),
-        "expected_duration_ms": (2500, 6000),
-        "peak_threshold": 0.40,
-        "description": "Hip hinge posterior chain. Phone clipped to waistband/belt.",
-        "icon": "🔱",
-    },
+    "deadlift": _make_template(
+        "Deadlift", "ay", _DEADLIFT_1D, 0.20, 0.12, 1, "hinge",
+        (2500, 6000), 0.40,
+        "Hip hinge posterior chain. Phone clipped to waistband/belt.", "🔱",
+    ),
 
-    "chestPress": {
-        "name": "Chest Press",
-        "primary_axis": "ay",
-        "signal_3d": _build_3d(_CHEST_PRESS_1D, secondary_scale=0.15, tertiary_scale=0.08, primary_idx=1),
-        "expected_duration_ms": (1500, 4000),
-        "peak_threshold": 0.30,
-        "description": "Horizontal push — pectorals. Phone flat on chest/sternum.",
-        "icon": "🏋️",
-    },
+    "chestPress": _make_template(
+        "Chest Press", "ay", _CHEST_PRESS_1D, 0.15, 0.08, 1, "press",
+        (1500, 4000), 0.30,
+        "Horizontal push — pectorals. Phone flat on chest/sternum.", "🏋️",
+    ),
 
-    "shoulderPress": {
-        "name": "Shoulder Press",
-        "primary_axis": "ay",
-        "signal_3d": _build_3d(_SHOULDER_PRESS_1D, secondary_scale=0.16, tertiary_scale=0.09, primary_idx=1),
-        "expected_duration_ms": (1500, 4000),
-        "peak_threshold": 0.35,
-        "description": "Overhead vertical press — deltoids. Phone in chest pocket.",
-        "icon": "💪",
-    },
+    "shoulderPress": _make_template(
+        "Shoulder Press", "ay", _SHOULDER_PRESS_1D, 0.16, 0.09, 1, "press",
+        (1500, 4000), 0.35,
+        "Overhead vertical press — deltoids. Phone in chest pocket.", "💪",
+    ),
 
-    "latPulldown": {
-        "name": "Lat Pulldown",
-        "primary_axis": "ay",
-        "signal_3d": _build_3d(_LAT_PULLDOWN_1D, secondary_scale=0.14, tertiary_scale=0.08, primary_idx=1),
-        "expected_duration_ms": (1500, 4000),
-        "peak_threshold": 0.30,
-        "description": "Vertical pull — latissimus dorsi. Phone in waistband.",
-        "icon": "⬇️",
-    },
+    "latPulldown": _make_template(
+        "Lat Pulldown", "ay", _LAT_PULLDOWN_1D, 0.14, 0.08, 1, "pull",
+        (1500, 4000), 0.30,
+        "Vertical pull — latissimus dorsi. Phone in waistband.", "⬇️",
+    ),
 
-    "rowing": {
-        "name": "Rowing",
-        "primary_axis": "az",
-        # Rowing primary axis is az (idx=2), with larger ax coupling
-        "signal_3d": _build_3d(_ROWING_1D, secondary_scale=0.22, tertiary_scale=0.12, primary_idx=2),
-        "expected_duration_ms": (1500, 4000),
-        "peak_threshold": 0.30,
-        "description": "Horizontal pull — rhomboids/mid-back. Phone held in hand.",
-        "icon": "🚣",
-    },
+    "rowing": _make_template(
+        "Rowing", "az", _ROWING_1D, 0.22, 0.12, 2, "row",
+        (1500, 4000), 0.30,
+        "Horizontal pull — rhomboids/mid-back. Phone held in hand.", "🚣",
+    ),
 
-    "bicepCurls": {
-        "name": "Bicep Curls",
-        "primary_axis": "ay",
-        "signal_3d": _build_3d(_BICEP_CURLS_1D, secondary_scale=0.12, tertiary_scale=0.06, primary_idx=1),
-        "expected_duration_ms": (1200, 3500),
-        "peak_threshold": 0.30,
-        "description": "Elbow flexion — biceps brachii. Phone held in hand.",
-        "icon": "💪",
-    },
+    "bicepCurls": _make_template(
+        "Bicep Curls", "ay", _BICEP_CURLS_1D, 0.12, 0.06, 1, "curl",
+        (2000, 4000), 0.30,
+        "Elbow flexion — biceps brachii. Phone held in hand.", "💪",
+    ),
 
-    "tricepsExtension": {
-        "name": "Triceps Extension",
-        "primary_axis": "ay",
-        "signal_3d": _build_3d(_TRICEPS_EXT_1D, secondary_scale=0.14, tertiary_scale=0.07, primary_idx=1),
-        "expected_duration_ms": (1200, 3500),
-        "peak_threshold": 0.30,
-        "description": "Elbow extension — triceps brachii. Phone in hand.",
-        "icon": "🦾",
-    },
+    "tricepsExtension": _make_template(
+        "Triceps Extension", "ay", _TRICEPS_EXT_1D, 0.14, 0.07, 1, "curl",
+        (2000, 4000), 0.30,
+        "Elbow extension — triceps brachii. Phone in hand.", "🦾",
+    ),
 }
 
 

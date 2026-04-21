@@ -200,6 +200,11 @@ export default function WorkoutPage() {
       typeof window !== 'undefined' &&
       (window.location.protocol === 'https:' || window.location.hostname === 'localhost')
     );
+    // Restore last result if page was reloaded mid-session
+    const saved = sessionStorage.getItem('formiq_last_result');
+    if (saved) {
+      try { setResult(JSON.parse(saved)); setWorkoutState('results'); } catch { /* ignore */ }
+    }
   }, []);
 
   const sendToApi = useCallback(async (ex: ExerciseKey, capturedFrames: SensorFrame[]) => {
@@ -244,7 +249,9 @@ export default function WorkoutPage() {
 
     try {
       const data = await sendToApi(exercise, captured);
-      setResult({ reps: data.reps, accuracy: data.accuracy, repScores: data.repScores, detectedSegments: data.detectedSegments, workoutId: data.workoutId });
+      const r = { reps: data.reps, accuracy: data.accuracy, repScores: data.repScores, detectedSegments: data.detectedSegments, workoutId: data.workoutId };
+      setResult(r);
+      sessionStorage.setItem('formiq_last_result', JSON.stringify(r));
       setWorkoutState('results');
     } catch (err) {
       setErrorMsg('Analysis failed: ' + (err instanceof Error ? err.message : String(err)));
@@ -253,6 +260,7 @@ export default function WorkoutPage() {
   }, [exercise, sendToApi]);
 
   const handleReset = useCallback(() => {
+    sessionStorage.removeItem('formiq_last_result');
     setResult(null); setErrorMsg(''); setFrames([]); setLiveFrames([]); setFrameCount(0);
     setWorkoutState('idle');
   }, []);

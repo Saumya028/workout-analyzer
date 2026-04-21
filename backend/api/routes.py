@@ -4,7 +4,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 import json
-import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +17,12 @@ from ..golden_rep_engine.templates import (
     GOLDEN_REP_TEMPLATES,
     EXERCISE_KEYS,
     EXERCISE_LIST,
+)
+from ..golden_rep_engine.calibration import (
+    save_user_golden_rep,
+    load_user_golden_rep,
+    delete_user_golden_rep,
+    list_user_calibrations,
 )
 
 router = APIRouter(prefix="/api")
@@ -56,9 +62,10 @@ class WorkoutRequest(BaseModel):
     sensorData: list[SensorFrame]
 
 
-class SimulateRequest(BaseModel):
-    exercise: str = "squats"
-    reps: int = 5
+class CalibrationRequest(BaseModel):
+    exercise: str
+    sensorData: list[SensorFrame]
+    repsToRecord: int = 3
 
 
 # ── POST /api/workout — Analyze a workout ────────────────────────────────────
@@ -89,7 +96,6 @@ async def post_workout(body: WorkoutRequest):
     )
 
     # Store in history
-    import uuid
     workout_id = str(uuid.uuid4())[:8]
     record = {
         "id": workout_id,
@@ -161,3 +167,57 @@ async def simulate_workout(exercise: str = "squats", reps: int = 5):
         "user_signals": analysis["user_signals"],
         "frame_count": len(frames),
     }
+
+
+# ── POST /api/calibrate — Record a personal golden rep ───────────────────────
+
+@router.post("/calibrate")
+async def calibrate_golden_rep(body: CalibrationRequest):
+    """
+    Record sensor data of the user performing their best reps.
+    The system detects individual reps, averages them into a personal
+    golden rep template, and stores it for future DTW comparison.
+    """
+    if body.exercise not in EXERCISE_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid exercise. Must be one of: {', '.join(EXERCISE_KEYS)}",
+        )
+
+    if len(body.sensorData) < 20:
+        raise HTTPException(
+            status_code=400,
+            detail="Not enough data for calibration. Record at least 3 reps.",
+        )
+
+    frames = [f.model_dump() for f in body.sensorData]
+    result = save_user_golden_rep(body.exercise, frames, body.repsToRecord)
+
+    return result
+
+
+# ── GET /api/calibrate — List user calibrations ──────────────────────────────
+
+@router.get("/calibrate")
+async def get_calibrations():
+    return {"calibrations": list_user_calibrations()}
+
+
+# ── GET /api/calibrate/{exercise} — Get specific calibration ─────────────────
+
+@router.get("/calibrate/{exercise}")
+async def get_calibration(exercise: str):
+    cal = load_user_golden_rep(exercise)
+    if not cal:
+        raise HTTPException(status_code=404, detail="No calibration found for this exercise.")
+    return cal
+
+
+# ── DELETE /api/calibrate/{exercise} — Remove calibration ────────────────────
+
+@router.delete("/calibrate/{exercise}")
+async def remove_calibration(exercise: str):
+    ok = delete_user_golden_rep(exercise)
+    if not ok:
+        raise HTTPException(status_code=404, detail="No calibration found.")
+    return {"message": f"Calibration for {exercise} deleted."}
